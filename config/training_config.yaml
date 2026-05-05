@@ -1,0 +1,63 @@
+# ─────────────────────────────────────────────
+#  Training Configuration
+# ─────────────────────────────────────────────
+
+training:
+  seed: 42
+  num_epochs: 30
+  batch_size: 8
+  gradient_accumulation_steps: 4
+  mixed_precision: "fp16"       # no | fp16 | bf16
+  gradient_checkpointing: true
+
+  # Phase 1: Train only cross-attention + user embeddings
+  phase1_epochs: 10
+  # Phase 2: Fine-tune full model end-to-end
+  phase2_epochs: 20
+
+optimizer:
+  type: "AdamW"
+  lr: 1.0e-4
+  weight_decay: 0.01
+  betas: [0.9, 0.999]
+  eps: 1.0e-8
+
+scheduler:
+  type: "cosine_with_warmup"
+  warmup_steps: 500
+  num_cycles: 1
+
+loss:
+  lambda1: 1.0    # rating regression weight
+  lambda2: 0.5    # BPR ranking weight
+  lambda3: 0.5    # cross-modal alignment weight
+  temperature: 0.07   # for contrastive alignment loss
+
+data:
+  hf_dataset: "mrtoy/mobile-ui-design"
+  kaggle_sketch_dataset: "vinothpandian/uisketch"
+  kaggle_prompt_dataset: "antrixsh/prompt-engineering-and-responses-dataset"
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  num_workers: 4
+  pin_memory: true
+  image_size: 512
+  max_text_length: 77    # CLIP token limit
+
+checkpointing:
+  save_dir: "checkpoints/"
+  save_every_n_epochs: 5
+  keep_last_k: 3
+  resume_from: null       # path to checkpoint or null
+
+logging:
+  use_wandb: false        # set to true if wandb configured
+  project_name: "vlm-ui-generator"
+  log_every_n_steps: 50
+  log_dir: "outputs/logs/"
+
+evaluation:
+  eval_every_n_epochs: 5
+  fid_samples: 1000       # samples for FID evaluation
+  generate_samples: 8     # samples to visualize per eval

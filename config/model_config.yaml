@@ -1,0 +1,41 @@
+# ─────────────────────────────────────────────
+#  Model Configuration
+# ─────────────────────────────────────────────
+
+vlm:
+  clip_model_name: "openai/clip-vit-base-patch32"
+  d_model: 512
+  image_size: 224
+  patch_size: 16
+  freeze_clip: false          # fine-tune CLIP encoders jointly
+  lora_rank: 16               # LoRA rank for efficient fine-tuning
+  lora_alpha: 32
+  lora_dropout: 0.1
+
+cross_attention:
+  num_heads: 8
+  dropout: 0.1
+  d_ff: 2048                  # feed-forward hidden size
+  num_layers: 4               # number of cross-attn layers
+  pooling: "mean"             # mean | cls | attention
+
+user_preference:
+  embedding_dim: 512
+  history_len: 20             # max interactions per user
+  attn_heads: 4
+
+generator:
+  base_model: "runwayml/stable-diffusion-v1-5"
+  controlnet_model: "lllyasviel/sd-controlnet-scribble"
+  use_controlnet: true
+  num_inference_steps: 50
+  guidance_scale: 7.5
+  controlnet_conditioning_scale: 1.0
+  output_image_size: 512
+
+diffusion:
+  noise_scheduler: "DDPM"    # DDPM | DDIM | PNDM
+  beta_start: 0.00085
+  beta_end: 0.012
+  beta_schedule: "scaled_linear"
+  num_train_timesteps: 1000
