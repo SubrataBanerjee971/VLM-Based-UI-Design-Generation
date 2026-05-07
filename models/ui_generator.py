@@ -85,25 +85,23 @@ class UIGeneratorModel(nn.Module):
     ):
         super().__init__()
         self.device_str = device
+        # Use float32 on CPU (always safe), float16 only on real CUDA
+        _use_fp16 = (device == "cuda" and torch.cuda.is_available())
+        _dtype = torch.float16 if _use_fp16 else torch.float32
 
         # ── ControlNet ───────────────────────────────────────────────────────
         self.controlnet = ControlNetModel.from_pretrained(
-            controlnet_model,
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            controlnet_model, torch_dtype=_dtype,
         )
 
         # ── UNet ─────────────────────────────────────────────────────────────
         self.unet = UNet2DConditionModel.from_pretrained(
-            base_model,
-            subfolder="unet",
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            base_model, subfolder="unet", torch_dtype=_dtype,
         )
 
         # ── VAE ──────────────────────────────────────────────────────────────
         self.vae = AutoencoderKL.from_pretrained(
-            base_model,
-            subfolder="vae",
-            torch_dtype=torch.float16 if device == "cuda" else torch.float32,
+            base_model, subfolder="vae", torch_dtype=_dtype,
         )
 
         # ── Text encoder ─────────────────────────────────────────────────────
@@ -161,6 +159,8 @@ class UIGeneratorModel(nn.Module):
         images: torch.Tensor,   # (B, 3, H, W) in [-1, 1]
     ) -> torch.Tensor:
         """Encode images to VAE latent space."""
+        # Cast to VAE's dtype to prevent float/half mismatches on CPU
+        images = images.to(dtype=next(self.vae.parameters()).dtype)
         with torch.no_grad():
             dist = self.vae.encode(images).latent_dist
         return dist.sample() * self.vae.config.scaling_factor
@@ -187,9 +187,11 @@ class UIGeneratorModel(nn.Module):
             loss : scalar MSE between predicted and actual noise
         """
         device = target_images.device
+        # Infer model dtype from UNet weights (float32 on CPU, float16 on CUDA)
+        model_dtype = next(self.unet.parameters()).dtype
 
         # 1. Encode target → latents
-        latents = self.encode_images_to_latents(target_images)
+        latents = self.encode_images_to_latents(target_images)   # dtype matches VAE
 
         # 2. Sample noise + timesteps
         noise = torch.randn_like(latents)
@@ -199,17 +201,22 @@ class UIGeneratorModel(nn.Module):
             (B,), device=device, dtype=torch.long,
         )
         noisy_latents = self.noise_scheduler.add_noise(latents, noise, timesteps)
+        noisy_latents = noisy_latents.to(dtype=model_dtype)
 
         # 3. Build conditioning embeddings
         text_embeds = self.encode_prompt(prompts, device)    # (B, L, d_text)
         encoder_hidden_states = self.injector(h_ui.to(text_embeds.dtype), text_embeds)
+        encoder_hidden_states = encoder_hidden_states.to(dtype=model_dtype)
+
+        # Cast sketch to model dtype for ControlNet
+        sketch_cond = sketch_images.to(dtype=model_dtype)
 
         # 4. ControlNet forward
         down_block_res_samples, mid_block_res_sample = self.controlnet(
             noisy_latents,
             timesteps,
             encoder_hidden_states=encoder_hidden_states,
-            controlnet_cond=sketch_images,
+            controlnet_cond=sketch_cond,
             return_dict=False,
         )
 
@@ -222,9 +229,10 @@ class UIGeneratorModel(nn.Module):
             mid_block_additional_residual=mid_block_res_sample,
         ).sample
 
-        # 6. MSE loss on noise prediction
+        # 6. MSE loss on noise prediction (always float32 for numerical stability)
         loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float())
         return loss
+
 
     # ── Inference ────────────────────────────────────────────────────────────
 

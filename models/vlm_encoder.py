@@ -55,19 +55,41 @@ class VLMEncoder(nn.Module):
             )
             self.clip = get_peft_model(self.clip, lora_cfg)
 
-        # ── Projection head to common d_model ───────────────────────────────
-        clip_hidden = self._get_clip_hidden_size()
-        self.img_proj  = nn.Linear(clip_hidden, d_model) if clip_hidden != d_model else nn.Identity()
-        self.txt_proj  = nn.Linear(clip_hidden, d_model) if clip_hidden != d_model else nn.Identity()
+        # ── Projection heads to common d_model ───────────────────────────
+        clip_vis_hidden = self._get_clip_hidden_size()        # patch-level (768 for ViT-B/32)
+        clip_txt_hidden = self._get_clip_text_hidden_size()   # token-level (512 for ViT-B/32)
+        clip_proj_dim   = self._get_clip_projection_dim()     # global feature dim (512 for ViT-B/32)
+
+        # patch / token level projections
+        self.img_proj = nn.Linear(clip_vis_hidden, d_model) if clip_vis_hidden != d_model else nn.Identity()
+        self.txt_proj = nn.Linear(clip_txt_hidden, d_model) if clip_txt_hidden != d_model else nn.Identity()
+
+        # global pooled-feature projections (CLIP already projects to projection_dim)
+        self.img_proj_global = nn.Linear(clip_proj_dim, d_model) if clip_proj_dim != d_model else nn.Identity()
+        self.txt_proj_global = nn.Linear(clip_proj_dim, d_model) if clip_proj_dim != d_model else nn.Identity()
 
     # ── Helpers ──────────────────────────────────────────────────────────────
 
     def _get_clip_hidden_size(self) -> int:
-        """Read the vision hidden size from CLIP config."""
+        """Read the VISION hidden size from CLIP config."""
         try:
             return self.clip.config.vision_config.hidden_size
         except AttributeError:
-            return 768   # CLIP ViT-B/32 default
+            return 768   # CLIP ViT-B/32 vision default
+
+    def _get_clip_text_hidden_size(self) -> int:
+        """Read the TEXT hidden size from CLIP config."""
+        try:
+            return self.clip.config.text_config.hidden_size
+        except AttributeError:
+            return 512   # CLIP ViT-B/32 text default
+
+    def _get_clip_projection_dim(self) -> int:
+        """Read CLIP's output projection dim (used by get_image/text_features)."""
+        try:
+            return self.clip.config.projection_dim
+        except AttributeError:
+            return 512   # CLIP ViT-B/32 default
 
     def _unwrapped_clip(self):
         """Return the underlying CLIPModel even if wrapped with PEFT."""
@@ -114,10 +136,15 @@ class VLMEncoder(nn.Module):
         """Global (pooled) image embedding.  Returns (B, d_model)."""
         clip = self._unwrapped_clip()
         feat = clip.get_image_features(pixel_values=pixel_values)  # (B, projection_dim)
-        # project to d_model if sizes differ
-        if feat.shape[-1] != self.d_model:
-            feat = self.img_proj(feat)
-        return feat
+        
+        # Ensure we have a Tensor (some transformers versions return objects)
+        if not isinstance(feat, torch.Tensor):
+            if hasattr(feat, "pooler_output"):
+                feat = feat.pooler_output
+            elif isinstance(feat, (list, tuple)):
+                feat = feat[0]
+
+        return self.img_proj_global(feat)  # identity if projection_dim == d_model
 
     def get_text_embedding(
         self,
@@ -128,10 +155,16 @@ class VLMEncoder(nn.Module):
         clip = self._unwrapped_clip()
         feat = clip.get_text_features(
             input_ids=input_ids, attention_mask=attention_mask
-        )
-        if feat.shape[-1] != self.d_model:
-            feat = self.txt_proj(feat)
-        return feat
+        )  # (B, projection_dim) = (B, 512) for ViT-B/32
+
+        # Ensure we have a Tensor
+        if not isinstance(feat, torch.Tensor):
+            if hasattr(feat, "pooler_output"):
+                feat = feat.pooler_output
+            elif isinstance(feat, (list, tuple)):
+                feat = feat[0]
+
+        return self.txt_proj_global(feat)  # identity if projection_dim == d_model
 
     def tokenize(
         self,

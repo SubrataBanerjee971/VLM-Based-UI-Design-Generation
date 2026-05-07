@@ -15,7 +15,13 @@ Usage
     python train.py checkpointing.resume_from=checkpoints/checkpoint_epoch0010.pth
 """
 
+# ── Credentials & env flags (must be set BEFORE any library imports) ─────────
 import os
+os.environ.setdefault("KAGGLE_USERNAME", "subratabanerjeerony")
+os.environ.setdefault("KAGGLE_KEY",      "KGAT_e248bc7a00abd94d8535b09a822d36a3")
+os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")   # suppress Windows symlink noise
+
+
 import random
 import logging
 
@@ -54,6 +60,16 @@ def main():
     # ── Device ───────────────────────────────────────────────────────────────
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
+
+    # ── CPU-safe overrides ────────────────────────────────────────────────────
+    if device.type == "cpu":
+        if cfg.training.mixed_precision in ("fp16", "bf16"):
+            logger.warning("CPU detected: overriding mixed_precision -> 'no'")
+            cfg.training.mixed_precision = "no"
+        if cfg.data.num_workers > 0:
+            logger.warning("CPU/Windows: setting num_workers -> 0 to avoid multiprocessing issues")
+            cfg.data.num_workers = 0
+        cfg.data.pin_memory = False
 
     # ── Reproducibility ───────────────────────────────────────────────────────
     set_seed(cfg.training.seed)

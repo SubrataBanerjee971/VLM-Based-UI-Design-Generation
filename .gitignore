@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# ML Models & Large Data
+checkpoints/
+outputs/
+logs/
+*.pth
+*.bin
+*.h5
+*.weights
+*.zip
+
+# Datasets (Local Downloads)
+data/downloads/
+data/raw/
+
+# Environments
+.venv
+venv/
+ENV/
+
+# IDEs
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db

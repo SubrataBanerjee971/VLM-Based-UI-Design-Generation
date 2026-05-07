@@ -27,6 +27,7 @@ from typing import Optional
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F_nn
 from torch.cuda.amp import GradScaler, autocast
 from torch.utils.data import DataLoader
 from omegaconf import DictConfig
@@ -145,22 +146,33 @@ class Trainer:
                     p.requires_grad_(True)
             logger.info("[Phase 2] End-to-end training (VAE + text_encoder frozen)")
 
+    # ── CLIP resize helper ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_clip_size(tensor: torch.Tensor, clip_size: int = 224) -> torch.Tensor:
+        """Resize a (B,3,H,W) tensor to clip_size×clip_size for CLIP encoder."""
+        if tensor.shape[-1] == clip_size and tensor.shape[-2] == clip_size:
+            return tensor
+        return F_nn.interpolate(tensor, size=(clip_size, clip_size),
+                                mode="bicubic", align_corners=False)
+
     # ── Single batch step ────────────────────────────────────────────────────
 
     def _step(self, batch: dict, phase: int) -> dict[str, float]:
-        sketch_pixels = batch["sketch"].to(self.device)          # CLIP-norm (B,3,224,224)
+        sketch_cond   = batch["sketch"].to(self.device)          # (B,3,512,512) ControlNet input
         target_images = batch["target_ui"].to(self.device)       # diffusion target
-        sketch_cond   = batch["sketch"].to(self.device)          # ControlNet input
+        # Resize sketch to 224×224 for CLIP encoder
+        sketch_pixels = self._to_clip_size(sketch_cond)          # (B,3,224,224)
         prompts       = batch["prompt"]                          # list[str]
         user_ids      = batch.get(
             "user_id",
-            torch.zeros(sketch_pixels.size(0), dtype=torch.long)
+            torch.zeros(sketch_cond.size(0), dtype=torch.long)
         ).to(self.device)
 
         # Dummy ratings in [1,5] for BPR if not provided
         ratings = batch.get(
             "rating",
-            torch.rand(sketch_pixels.size(0)) * 4 + 1,
+            torch.rand(sketch_cond.size(0)) * 4 + 1,
         ).to(self.device)
 
         # Tokenise prompts
@@ -214,34 +226,38 @@ class Trainer:
         pbar = tqdm(self.train_loader, desc=f"Epoch {epoch} [Phase {phase}]", leave=False)
 
         for step_in_epoch, batch in enumerate(pbar):
-            loss_dict = self._step(batch, phase)
-            loss      = torch.tensor(loss_dict["total"], device=self.device,
-                                     requires_grad=False)
+            # ── Prepare tensors ───────────────────────────────────────────────
+            sketch_cond   = batch["sketch"].to(self.device)       # (B,3,512,512) ControlNet
+            target_images = batch["target_ui"].to(self.device)    # diffusion target
+            sketch_pixels = self._to_clip_size(sketch_cond)       # (B,3,224,224) CLIP
+            prompts       = batch["prompt"]
+            B             = sketch_cond.size(0)
+            user_ids      = batch.get(
+                "user_id", torch.zeros(B, dtype=torch.long)
+            ).to(self.device)
+            ratings       = batch.get(
+                "rating", torch.rand(B) * 4 + 1
+            ).to(self.device)
 
-            # Re-compute backward with autocast
+            # Re-compute forward + backward with autocast
             with autocast(enabled=self.use_amp, dtype=self.amp_dtype):
-                tok = self.model.encoder.tokenize(batch["prompt"], device=self.device)
+                tok = self.model.encoder.tokenize(prompts, device=self.device)
                 out = self.model(
-                    sketch_pixels = batch["sketch"].to(self.device),
-                    target_images = batch["target_ui"].to(self.device),
-                    sketch_cond   = batch["sketch"].to(self.device),
+                    sketch_pixels = sketch_pixels,
+                    target_images = target_images,
+                    sketch_cond   = sketch_cond,
                     prompt_ids    = tok["input_ids"],
                     prompt_mask   = tok["attention_mask"],
-                    prompts       = batch["prompt"],
-                    user_ids      = batch.get(
-                        "user_id", torch.zeros(batch["sketch"].size(0), dtype=torch.long)
-                    ).to(self.device),
-                    ratings       = batch.get(
-                        "rating", torch.rand(batch["sketch"].size(0)) * 4 + 1
-                    ).to(self.device),
+                    prompts       = prompts,
+                    user_ids      = user_ids,
+                    ratings       = ratings,
                 )
-                B       = batch["sketch"].size(0)
                 neg_idx = torch.randperm(B, device=self.device)
-                v_emb   = self.model.encoder.get_image_embedding(batch["sketch"].to(self.device))
+                v_emb   = self.model.encoder.get_image_embedding(sketch_pixels)
                 t_emb   = self.model.encoder.get_text_embedding(tok["input_ids"], tok["attention_mask"])
                 losses  = self.criterion(
                     r_hat     = out["r_hat"],
-                    r_true    = batch.get("rating", torch.rand(B)*4+1).to(self.device),
+                    r_true    = ratings,
                     r_hat_pos = out["r_hat"],
                     r_hat_neg = out["r_hat"][neg_idx],
                     v_embed   = v_emb,
@@ -283,6 +299,15 @@ class Trainer:
                     import wandb
                     wandb.log(row, step=self.global_step)
 
+                # Periodic auto-checkpoint (safety for slow training)
+                ckpt_dir = Path(self.cfg.checkpointing.save_dir)
+                save_checkpoint(
+                    self.model, self.optimizer, self.scheduler,
+                    epoch, self.global_step,
+                    ckpt_dir / "last_checkpoint.pth",
+                )
+                logger.info(f"  [Step {self.global_step}] Auto-checkpoint saved to last_checkpoint.pth")
+
         return total_loss / max(len(self.train_loader), 1)
 
     # ── Validation ───────────────────────────────────────────────────────────
@@ -294,19 +319,22 @@ class Trainer:
         all_r_hat, all_r_true = [], []
 
         for batch in tqdm(self.val_loader, desc=f"Epoch {epoch} [Val]", leave=False):
+            sketch_cond   = batch["sketch"].to(self.device)
+            sketch_pixels = self._to_clip_size(sketch_cond)  # resize to 224×224 for CLIP
+            B             = sketch_cond.size(0)
             tok = self.model.encoder.tokenize(batch["prompt"], device=self.device)
             out = self.model(
-                sketch_pixels = batch["sketch"].to(self.device),
+                sketch_pixels = sketch_pixels,
                 target_images = batch["target_ui"].to(self.device),
-                sketch_cond   = batch["sketch"].to(self.device),
+                sketch_cond   = sketch_cond,
                 prompt_ids    = tok["input_ids"],
                 prompt_mask   = tok["attention_mask"],
                 prompts       = batch["prompt"],
                 user_ids      = batch.get(
-                    "user_id", torch.zeros(batch["sketch"].size(0), dtype=torch.long)
+                    "user_id", torch.zeros(B, dtype=torch.long)
                 ).to(self.device),
                 ratings       = batch.get(
-                    "rating", torch.rand(batch["sketch"].size(0)) * 4 + 1
+                    "rating", torch.rand(B) * 4 + 1
                 ).to(self.device),
             )
             total_loss += out["gen_loss"].item() + out["rating_loss"].item()
@@ -362,7 +390,7 @@ class Trainer:
                         epoch, self.global_step,
                         ckpt_dir / "best_model.pth",
                     )
-                    logger.info(f"  ↳ New best model saved (val_loss={val_loss:.4f})")
+                    logger.info(f"  -> New best model saved (val_loss={val_loss:.4f})")
 
             # Periodic checkpoint
             if epoch % self.cfg.checkpointing.save_every_n_epochs == 0:
