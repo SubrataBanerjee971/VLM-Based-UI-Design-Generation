@@ -117,6 +117,12 @@ class MultiTaskLoss(nn.Module):
         l_align  = cross_modal_alignment_loss(v_embed, t_embed, self.temperature)
         l_gen    = gen_loss
 
+        # --- Sanitize individual losses ---
+        l_rating = torch.where(torch.isnan(l_rating), torch.zeros_like(l_rating), l_rating)
+        l_bpr    = torch.where(torch.isnan(l_bpr), torch.zeros_like(l_bpr), l_bpr)
+        l_align  = torch.where(torch.isnan(l_align), torch.zeros_like(l_align), l_align)
+        l_gen    = torch.where(torch.isnan(l_gen), torch.zeros_like(l_gen), l_gen)
+
         total = (
             w[0] * l_rating
             + w[1] * l_bpr
