@@ -74,7 +74,23 @@ def main():
     # ── Reproducibility ───────────────────────────────────────────────────────
     set_seed(cfg.training.seed)
 
-    # ── DataLoaders ───────────────────────────────────────────────────────────
+    # ── Auto-Resume & Colab Optimization ──────────────────────────────────────
+    import os
+    # Detect if running in Google Colab
+    is_colab = 'COLAB_GPU' in os.environ
+    if is_colab:
+        logger.info("Colab detected: Applying speed and stability optimizations...")
+        cfg.data.num_workers = 0
+        cfg.training.mixed_precision = "no"
+        
+    # Auto-resume from last_checkpoint.pth if it exists and no resume_from is set
+    ckpt_path = os.path.join(cfg.checkpointing.save_dir, "last_checkpoint.pth")
+    if cfg.checkpointing.resume_from is None and os.path.exists(ckpt_path):
+        logger.info(f"Found auto-checkpoint at {ckpt_path}. Resuming training...")
+        cfg.checkpointing.resume_from = ckpt_path
+    # ──────────────────────────────────────────────────────────────────────────
+
+    # ── Data ──────────────────────────────────────────────────────────────────
     logger.info("Building dataloaders …")
     train_loader, val_loader, test_loader = build_dataloaders(cfg)
 
