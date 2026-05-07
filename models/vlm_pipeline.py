@@ -178,13 +178,19 @@ class VLMUIPipeline(nn.Module):
         InfoNCE / CLIP-style contrastive loss.
             L_align = -log [ exp(sim(v_ui, t_ui)/τ) / Σ_j exp(sim(v_ui, t_uj)/τ) ]
         """
-        v = nn.functional.normalize(v, dim=-1)
-        t = nn.functional.normalize(t, dim=-1)
-        sim = torch.matmul(v, t.T) / temperature   # (B, B)
-        labels = torch.arange(sim.size(0), device=sim.device)
+        # Normalize embeddings for cosine similarity with epsilon for stability
+        v_norm = nn.functional.normalize(v, p=2, dim=-1, eps=1e-6)
+        t_norm = nn.functional.normalize(t, p=2, dim=-1, eps=1e-6)
+
+        # Compute cosine similarity matrix
+        logits = torch.matmul(v_norm, t_norm.t()) / temperature
+        
+        # Clamp logits to prevent extreme values that cause NaN in Softmax
+        logits = torch.clamp(logits, min=-100, max=100)
+        labels = torch.arange(logits.size(0), device=logits.device)
         loss = (
-            nn.functional.cross_entropy(sim, labels)
-            + nn.functional.cross_entropy(sim.T, labels)
+            nn.functional.cross_entropy(logits, labels)
+            + nn.functional.cross_entropy(logits.T, labels)
         ) / 2
         return loss
 
