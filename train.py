@@ -95,13 +95,14 @@ def main():
     train_loader, val_loader, test_loader = build_dataloaders(cfg)
 
     # ── Model ─────────────────────────────────────────────────────────────────
-    logger.info("Initialising model …")
+    logger.info("Initializing VLM-UI Brain (loading CLIP and Stable Diffusion)... This can take 2-5 minutes.")
     model = VLMUIPipeline(model_cfg=cfg, num_users=50_000)
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total     = sum(p.numel() for p in model.parameters())
     logger.info(f"Parameters: {trainable:,} trainable / {total:,} total")
 
     # ── Trainer ───────────────────────────────────────────────────────────────
+    logger.info("Setting up Trainer engine...")
     trainer = Trainer(
         model        = model,
         train_loader = train_loader,
@@ -110,7 +111,7 @@ def main():
         device       = device,
     )
 
-    logger.info("Starting training …")
+    logger.info("Starting training engine...")
     trainer.train()
 
 

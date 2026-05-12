@@ -52,12 +52,26 @@ def load_ui_sketch_dataset() -> pd.DataFrame:
     logger.info("Downloading vinothpandian/uisketch from Kaggle ...")
     dataset_path = Path(kagglehub.dataset_download("vinothpandian/uisketch"))
 
-    csv_path = dataset_path / "labels.csv"
-    if not csv_path.exists():
-        raise FileNotFoundError(f"labels.csv not found in {dataset_path}")
+    # Search for labels.csv anywhere in the downloaded folder
+    csv_path = None
+    for p in dataset_path.rglob("labels.csv"):
+        csv_path = p
+        break
+    
+    if not csv_path or not csv_path.exists():
+        # Try any CSV if labels.csv isn't found
+        csvs = list(dataset_path.rglob("*.csv"))
+        if not csvs:
+            raise FileNotFoundError(f"No CSV found in {dataset_path}")
+        csv_path = csvs[0]
 
+    logger.info(f"  -> Found sketch manifest at: {csv_path}")
     df = pd.read_csv(csv_path)
-    df["full_path"] = df["name"].apply(lambda n: str(dataset_path / n))
+    
+    # Correct paths if the CSV is in a subdirectory
+    base_dir = csv_path.parent
+    df["full_path"] = df["name"].apply(lambda n: str(base_dir / n))
+    
     df = df[df["full_path"].apply(lambda p: Path(p).exists())].reset_index(drop=True)
     logger.info(f"  -> {len(df)} sketch records in manifest")
     return df
@@ -72,13 +86,17 @@ def load_prompt_dataset() -> pd.DataFrame:
     dataset_path = Path(kagglehub.dataset_download(
         "antrixsh/prompt-engineering-and-responses-dataset"
     ))
-    csv_path = dataset_path / "prompt_engineering_dataset.csv"
-    if not csv_path.exists():
-        csvs = list(dataset_path.glob("*.csv"))
-        if not csvs:
-            raise FileNotFoundError(f"No CSV found in {dataset_path}")
-        csv_path = csvs[0]
+    
+    csv_path = None
+    # Search recursively for the CSV
+    for p in dataset_path.rglob("*.csv"):
+        csv_path = p
+        break
 
+    if not csv_path or not csv_path.exists():
+        raise FileNotFoundError(f"No CSV found in {dataset_path}")
+
+    logger.info(f"  -> Found prompt dataset at: {csv_path}")
     df = pd.read_csv(csv_path)
     logger.info(f"  -> {len(df)} prompts loaded from {csv_path.name}")
     return df
